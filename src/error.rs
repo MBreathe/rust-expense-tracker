@@ -9,13 +9,12 @@ pub enum AppError {
 
 impl From<sqlx::Error> for AppError {
     fn from(err: sqlx::Error) -> Self {
-        if let Some(db_err) = err.as_database_error() {
-            if db_err.kind() == sqlx::error::ErrorKind::ForeignKeyViolation {
-                return AppError::Conflict(
-                    "category is referenced by an expense, or does not exist",
-                );
-            }
+        if let Some(db_err) = err.as_database_error()
+            && db_err.kind() == sqlx::error::ErrorKind::ForeignKeyViolation
+        {
+            return AppError::Conflict("category is referenced by an expense, or does not exist");
         }
+
         AppError::Internal(err)
     }
 }
