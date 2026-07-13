@@ -57,7 +57,7 @@ pub async fn update_expense(
         description: new_expense.description,
         date: new_expense.date,
     };
-    state.insert_expense(expense.clone()).await?;
+    state.update_expense(expense.clone()).await?;
     Ok(Json(expense))
 }
 
