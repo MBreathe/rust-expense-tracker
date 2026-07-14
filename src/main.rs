@@ -7,9 +7,10 @@ use tokio::net::TcpListener;
 async fn main() {
     dotenvy::dotenv().ok();
     let database_url = var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let jwt_secret = var("JWT_SECRET").expect("JWT_SECRET must be set");
 
     let pool = connect(&database_url).await;
-    let state = AppState::new(pool);
+    let state = AppState::new(pool, jwt_secret);
 
     let listener = TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app(state)).await.unwrap();

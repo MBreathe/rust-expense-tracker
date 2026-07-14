@@ -6,6 +6,7 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
+    auth::AuthUser,
     error::AppError,
     models::expense::{Expense, NewExpense},
     state::AppState,
@@ -20,13 +21,17 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-pub async fn list_expenses(State(state): State<AppState>) -> Result<Json<Vec<Expense>>, AppError> {
+pub async fn list_expenses(
+    State(state): State<AppState>,
+    AuthUser(_user): AuthUser,
+) -> Result<Json<Vec<Expense>>, AppError> {
     let expenses = state.list_expenses().await?;
     Ok(Json(expenses))
 }
 
 pub async fn create_expense(
     State(state): State<AppState>,
+    AuthUser(_user): AuthUser,
     Json(new_expense): Json<NewExpense>,
 ) -> Result<Json<Expense>, AppError> {
     let expense = Expense {
@@ -42,6 +47,7 @@ pub async fn create_expense(
 
 pub async fn get_expense(
     State(state): State<AppState>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Expense>, AppError> {
     let expense = state
@@ -53,6 +59,7 @@ pub async fn get_expense(
 
 pub async fn update_expense(
     State(state): State<AppState>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
     Json(new_expense): Json<NewExpense>,
 ) -> Result<Json<Expense>, AppError> {
@@ -73,6 +80,7 @@ pub async fn update_expense(
 
 pub async fn delete_expense(
     State(state): State<AppState>,
+    AuthUser(_user): AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Expense>, AppError> {
     let expense = state

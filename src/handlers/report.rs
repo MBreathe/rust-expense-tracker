@@ -5,6 +5,7 @@ use axum::{
 };
 
 use crate::{
+    auth::AuthUser,
     error::AppError,
     models::report::{CategoryMonthTotal, CategoryTotal, MonthTotal, ReportFilter, TotalReport},
     state::AppState,
@@ -20,6 +21,7 @@ pub fn routes() -> Router<AppState> {
 
 pub async fn total_report(
     State(state): State<AppState>,
+    AuthUser(_user): AuthUser,
     Query(filter): Query<ReportFilter>,
 ) -> Result<Json<TotalReport>, AppError> {
     let report = state.total_report(filter.from, filter.to).await?;
@@ -28,6 +30,7 @@ pub async fn total_report(
 
 pub async fn totals_by_category(
     State(state): State<AppState>,
+    AuthUser(_user): AuthUser,
     Query(filter): Query<ReportFilter>,
 ) -> Result<Json<Vec<CategoryTotal>>, AppError> {
     let totals = state.totals_by_category(filter.from, filter.to).await?;
@@ -36,6 +39,7 @@ pub async fn totals_by_category(
 
 pub async fn totals_by_month(
     State(state): State<AppState>,
+    AuthUser(_user): AuthUser,
     Query(filter): Query<ReportFilter>,
 ) -> Result<Json<Vec<MonthTotal>>, AppError> {
     let totals = state.totals_by_month(filter.from, filter.to).await?;
@@ -44,6 +48,7 @@ pub async fn totals_by_month(
 
 pub async fn totals_by_category_month(
     State(state): State<AppState>,
+    AuthUser(_user): AuthUser,
     Query(filter): Query<ReportFilter>,
 ) -> Result<Json<Vec<CategoryMonthTotal>>, AppError> {
     let totals = state

@@ -16,9 +16,10 @@ integration test suite are done. The project deliberately expanded scope mid-M2:
 moved from a fixed Rust enum to their own database-backed resource with CRUD endpoints, once a
 closed category list felt too limiting.
 
-M3 stretch goals: reports/totals, basic auth, a CLI client, Docker packaging. Reports/totals
-(the first of these) is done — see the `report` bullets in Architecture/Database/Testing
-below. The rest aren't started; no decision yet on which is next.
+M3 stretch goals: reports/totals, basic auth, a CLI client, Docker packaging. Reports/totals and
+basic auth (see the `report`/`user`/`auth` bullets in Architecture/Database/Testing below) are
+both done. The API now requires a bearer token on every route except `POST /auth/register` and
+`POST /auth/login`. A CLI client and Docker packaging remain; no decision yet on which is next.
 
 ## Architecture
 
@@ -32,9 +33,15 @@ below. The rest aren't started; no decision yet on which is next.
   calendar date. `ReportFilter` (`Deserialize`-only, `from`/`to`: `Option<NaiveDate>`) is the
   shared query-param struct for all four report endpoints, extracted via Axum's
   `Query<ReportFilter>` the same way `Json<NewExpense>` extracts a body.
-- **`state.rs`** — defines the single `AppState` struct (`Clone`, wraps a `sqlx::SqlitePool`).
-  Registered once via `.with_state(...)` in `main.rs`; every handler reaches it via Axum's
-  `State<AppState>` extractor.
+- **`models/user.rs`** — `User { id, username }` (`Serialize`-only — no `password_hash` field,
+  so it's structurally impossible to leak one in a response) and `Credentials { username,
+  password }` (`Deserialize`-only, deliberately shared by both `/auth/register` and
+  `/auth/login` since both receive exactly the same shape).
+- **`state.rs`** — defines the single `AppState` struct (`Clone`, wraps a `sqlx::SqlitePool`
+  plus a `pub jwt_secret: String`). `pool` stays private — only reached through `AppState`'s
+  own methods — while `jwt_secret` is `pub` since `auth.rs` needs to read it directly from
+  outside the `state` module. Registered once via `.with_state(...)` in `main.rs`; every
+  handler reaches it via Axum's `State<AppState>` extractor.
 - **`state/{expense,category}.rs`** — each contributes its own `impl AppState { ... }` block
   (Rust allows splitting a type's impl across files/modules) with that resource's async query
   methods (`list_*`, `insert_*`, `get_expense`, `remove_*`). Method names are resource-prefixed
@@ -42,10 +49,25 @@ below. The rest aren't started; no decision yet on which is next.
   (compile-time checked against the live `DATABASE_URL` schema); `remove_*` uses
   `DELETE ... RETURNING` to check-and-delete atomically in one query rather than a separate
   read then delete.
+- **`state/user.rs`** — `insert_user` hashes the password with `argon2` before inserting
+  (`SaltString::generate` for a fresh per-user salt, `Argon2::default().hash_password(...)`,
+  stored as the standard PHC string via `.to_string()`). `verify_credentials` looks the user up
+  by username and verifies the hash, returning `Option<Uuid>` rather than a `bool` — collapsing
+  "no such username" and "wrong password" into the same `None`, which is what lets the login
+  handler return one identical error message for both (see `auth.rs` and `handlers/user.rs`).
 - **`error.rs`** — `AppError` (`NotFound(&'static str)`, `Conflict(&'static str)`,
-  `Internal(sqlx::Error)`) implements Axum's `IntoResponse`. `From<sqlx::Error> for AppError`
-  inspects `sqlx::Error::as_database_error().kind()` to map SQLite foreign-key violations to
+  `Internal(sqlx::Error)`, `Unauthorized(&'static str)`) implements Axum's `IntoResponse`.
+  `From<sqlx::Error> for AppError` inspects `sqlx::Error::as_database_error().kind()` to map
+  SQLite foreign-key violations and `UNIQUE` violations (e.g. a duplicate username) both to
   `Conflict` (409); everything else becomes `Internal` (500).
+- **`auth.rs`** — cross-cutting, like `error.rs`: not a resource itself, but every resource's
+  handlers depend on it. Holds `Claims { sub: Uuid, exp: usize }` (the JWT payload), the
+  `AuthUser(pub Uuid)` extractor — a hand-written `FromRequestParts<AppState>` impl, unlike
+  `State`/`Path`/`Query` which are Axum's own built-in impls, since pulling the `Authorization`
+  header, stripping the `Bearer ` prefix, and decoding/validating the JWT isn't something a
+  built-in extractor does — and `issue_token(user_id, secret)` (wraps `jsonwebtoken::encode`,
+  called from the login handler). `AuthUser`'s `Rejection` type is `AppError` directly, since
+  it already implements `IntoResponse` — no need for a separate rejection type.
 - **`handlers/{expense,category,report}.rs`** — thin: extract `State`/`Path`/`Query`/`Json`,
   delegate to `AppState` methods, map `Option`/errors via `.ok_or(AppError::NotFound(...))?`.
   The four report handlers have no `NotFound`/`Conflict` path at all — an empty or nonsensical
@@ -53,18 +75,30 @@ below. The rest aren't started; no decision yet on which is next.
   only there for the `?` on a possible `sqlx::Error`. Each module also exposes its own
   `pub fn routes() -> Router<AppState>` bundling that resource's paths, written relative to
   where the module gets mounted (e.g. `report::routes()` uses `"/total"`, not `"/reports/total"`).
+  Every handler in these three files (12 total) also takes `AuthUser(_user): AuthUser` as a
+  parameter — unused (nothing is scoped per-user yet), it's there purely so Axum runs the
+  extractor, and its 401 on failure, before the handler body ever executes.
+- **`handlers/user.rs`** — `register`/`login`, plus its own `routes()`. `register` calls
+  `insert_user` and returns the created `User`; `login` calls `verify_credentials` and, on
+  `Some(user_id)`, `auth::issue_token`; on `None`, returns
+  `AppError::Unauthorized("invalid username or password")` — one message covering both "no
+  such user" and "wrong password". Mounted via `.nest("/auth", user::routes())` in `lib.rs`, so
+  the real paths are `/auth/register`/`/auth/login` (a deliberate deviation from an earlier,
+  bare `/register`/`/login` design).
 - **`lib.rs`** — the crate is split bin+lib specifically so integration tests (which compile
   as separate crates and can only see the public library surface) can reach the app. Exposes
-  `pub mod {error,handlers,models,state}`, plus `app(state: AppState) -> Router` and
+  `pub mod {auth,error,handlers,models,state}`, plus `app(state: AppState) -> Router` and
   `connect(database_url: &str) -> SqlitePool` (builds the pool with `PRAGMA foreign_keys = ON`
-  and runs embedded migrations via `sqlx::migrate!()`). `app()` no longer lists routes
-  directly — it composes each resource module's `routes()` via
-  `.nest("/categories", category::routes())` / `.nest("/expenses", expense::routes())` /
-  `.nest("/reports", report::routes())`, so each module owns its own path list and `lib.rs`
-  just assembles them.
-- **`main.rs`** — thin: loads `.env` via `dotenvy`, calls `connect()`, builds `AppState`,
-  binds a `TcpListener`, calls `axum::serve(listener, app(state))`. Nothing here is needed by
-  tests, which call `connect`/`app` directly instead of going through `main`.
+  and runs embedded migrations via `sqlx::migrate!()`). `app()` composes each resource module's
+  `routes()` via `.nest("/categories", ...)` / `.nest("/expenses", ...)` / `.nest("/reports",
+  ...)` / `.nest("/auth", user::routes())`, so each module owns its own path list. `connect()`
+  only builds the `SqlitePool` — `AppState::new(pool, jwt_secret)` happens separately (in
+  `main.rs`, and in each test file's `test_state()`), since the JWT secret has nothing to do
+  with the database connection.
+- **`main.rs`** — thin: loads `.env` via `dotenvy`, reads `DATABASE_URL`/`JWT_SECRET`, calls
+  `connect()`, builds `AppState::new(pool, jwt_secret)`, binds a `TcpListener`, calls
+  `axum::serve(listener, app(state))`. Nothing here is needed by tests, which call
+  `connect`/`app` directly instead of going through `main`.
 - `state/expense.rs` has both `insert_expense` (plain `INSERT`, used by `create_expense`) and
   `update_expense` (a real `UPDATE ... SET ... WHERE id = ?`, used by `update_expense`'s
   handler) — these are deliberately separate methods, not one reused for both. An earlier
@@ -78,12 +112,17 @@ below. The rest aren't started; no decision yet on which is next.
 
 - Schema lives in `migrations/` (sqlx migrations, applied via `sqlx migrate run` or
   automatically on binary startup). `categories` table before `expenses` — the latter has
-  `category_id REFERENCES categories (id)`.
+  `category_id REFERENCES categories (id)`. `users` (`id`, `username` UNIQUE NOT NULL,
+  `password_hash`) has no FK relationship to anything else — nothing is scoped per-user yet,
+  the table exists purely to gate API access.
 - UUIDs are stored as SQLite `TEXT`; query macros need an explicit cast for non-obvious
   column types, e.g. `id as "id: Uuid"`, `date as "date: NaiveDate"` — the macro can't infer
   these from a plain `TEXT`/`INTEGER` column affinity.
 - `DATABASE_URL` (in `.env`, gitignored) must be set for both `sqlx-cli` and the `query!`/
-  `query_as!` macros to type-check against the real schema at compile time.
+  `query_as!` macros to type-check against the real schema at compile time. `JWT_SECRET` lives
+  alongside it. `.env.dummy` is the committed template (git-tracked, unlike `.env`) — it needs
+  a real-looking but fake value for each var, not the actual secret; a genuine `JWT_SECRET`
+  briefly ended up there by mistake before being caught and replaced.
 - Aggregate/computed columns (`SUM(...)`, `COALESCE(...)`) aren't real table columns, so the
   `query!`/`query_as!` macros can't infer their nullability from schema metadata the way they
   can for e.g. `categories.name` — they need an explicit `!` override (e.g.
@@ -102,8 +141,11 @@ below. The rest aren't started; no decision yet on which is next.
 
 - `tests/api.rs` — integration tests driving the real `Router` in-process via
   `tower::ServiceExt::oneshot` (no port bound, no real TCP), asserting on real HTTP
-  status/JSON bodies. A shared `request(&app, method, uri, body)` helper builds the request
-  and returns `(StatusCode, serde_json::Value)`, to cut down repetition across tests.
+  status/JSON bodies. A shared `request(&app, method, uri, token, body)` helper builds the
+  request (attaching an `Authorization: Bearer` header when `token` is `Some`) and returns
+  `(StatusCode, serde_json::Value)`, to cut down repetition across tests. Since every route
+  except `/auth/*` requires a token, each test also calls a `register_and_login(&app)` helper
+  once at the top to get one.
 - Each test builds its own fresh `sqlx::sqlite::SqlitePoolOptions` pool against
   `"sqlite::memory:"`, with **`.max_connections(1)`** — important: SQLite's `:memory:` gives
   each *connection* its own separate empty database, so a pool with more than one connection
@@ -116,13 +158,21 @@ below. The rest aren't started; no decision yet on which is next.
   each file under `tests/` as its own integration-test binary, and doc-tests.
 - **`tests/reports.rs`** — same in-process pattern as `tests/api.rs`, in its own file/binary
   since integration tests each compile as a separate crate and can't share code without a
-  `tests/common/` module (not introduced — `test_state()`/`request()` are duplicated here the
-  same way, rather than adding shared test infrastructure for two files). Coverage: `total` on
-  an empty DB (`0.0`, not an error — exercises the `COALESCE` override), summed and
-  date-range-filtered; `by-category` grouping (and that a category with zero matching expenses
-  doesn't appear, since it comes from `GROUP BY`, not a `LEFT JOIN`); `by-month` grouping and
-  chronological sort; the combined `by-category-month` grouping; and `from > to` returning an
-  empty/zero result rather than an error.
+  `tests/common/` module (not introduced — `test_state()`/`request()`, including the token
+  handling, are duplicated here the same way, rather than adding shared test infrastructure
+  for three files). Coverage: `total` on an empty DB (`0.0`, not an error — exercises the
+  `COALESCE` override), summed and date-range-filtered; `by-category` grouping (and that a
+  category with zero matching expenses doesn't appear, since it comes from `GROUP BY`, not a
+  `LEFT JOIN`); `by-month` grouping and chronological sort; the combined `by-category-month`
+  grouping; and `from > to` returning an empty/zero result rather than an error.
+- **`tests/auth.rs`** — same in-process pattern, its own file/binary again. Covers register
+  (success; duplicate username → 409), login (valid credentials → a token; wrong password and
+  unknown username both → 401), and the `AuthUser` guard (missing/invalid/expired token all →
+  401, valid token succeeds). One test compares raw response *bytes* rather than the usual
+  JSON-parsed value — `AppError`'s plain-text error bodies aren't valid JSON, so
+  `serde_json::from_slice(...).unwrap_or(Value::Null)` collapses both to `Value::Null`
+  regardless of their actual text, which would make a "these two responses are identical"
+  assertion pass trivially, catching nothing.
 
 ## Commands
 

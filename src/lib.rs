@@ -4,6 +4,7 @@ use axum::Router;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
+pub mod auth;
 pub mod error;
 pub mod handlers;
 pub mod models;
@@ -12,11 +13,14 @@ pub mod state;
 use handlers::{category, expense, report};
 use state::AppState;
 
+use crate::handlers::user;
+
 pub fn app(state: AppState) -> Router {
     Router::new()
         .nest("/categories", category::routes())
         .nest("/expenses", expense::routes())
         .nest("/reports", report::routes())
+        .nest("/auth", user::routes())
         .with_state(state)
 }
 

@@ -16,16 +16,20 @@ async fn test_state() -> AppState {
         .await
         .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
-    AppState::new(pool)
+    AppState::new(pool, "test-secret".to_string())
 }
 
 async fn request(
     app: &Router,
     method: &str,
     uri: &str,
+    token: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
     let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
     let body = match body {
         Some(json) => {
             builder = builder.header("content-type", "application/json");
@@ -43,11 +47,34 @@ async fn request(
     (status, value)
 }
 
+/// Registers and logs in a fresh test user, returning a bearer token to use
+/// against every protected route in these tests.
+async fn register_and_login(app: &Router) -> String {
+    request(
+        app,
+        "POST",
+        "/auth/register",
+        None,
+        Some(json!({"username": "testuser", "password": "hunter2"})),
+    )
+    .await;
+    let (_, login) = request(
+        app,
+        "POST",
+        "/auth/login",
+        None,
+        Some(json!({"username": "testuser", "password": "hunter2"})),
+    )
+    .await;
+    login["token"].as_str().unwrap().to_string()
+}
+
 #[tokio::test]
 async fn total_report_on_empty_db_returns_zero() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
-    let (status, report) = request(&app, "GET", "/reports/total", None).await;
+    let (status, report) = request(&app, "GET", "/reports/total", Some(&token), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(report["total"], 0.0);
 }
@@ -55,11 +82,13 @@ async fn total_report_on_empty_db_returns_zero() {
 #[tokio::test]
 async fn total_report_sums_all_expenses() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (_, category) = request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Groceries"})),
     )
     .await;
@@ -69,6 +98,7 @@ async fn total_report_sums_all_expenses() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 12.5, "category_id": category_id, "description": "milk", "date": "2026-07-09"})),
     )
     .await;
@@ -76,11 +106,12 @@ async fn total_report_sums_all_expenses() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 40.0, "category_id": category_id, "description": "rice", "date": "2026-07-10"})),
     )
     .await;
 
-    let (status, report) = request(&app, "GET", "/reports/total", None).await;
+    let (status, report) = request(&app, "GET", "/reports/total", Some(&token), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(report["total"], 52.5);
 }
@@ -88,11 +119,13 @@ async fn total_report_sums_all_expenses() {
 #[tokio::test]
 async fn total_report_respects_date_range() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (_, category) = request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Groceries"})),
     )
     .await;
@@ -102,6 +135,7 @@ async fn total_report_respects_date_range() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 12.5, "category_id": category_id, "description": "milk", "date": "2026-06-15"})),
     )
     .await;
@@ -109,6 +143,7 @@ async fn total_report_respects_date_range() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 40.0, "category_id": category_id, "description": "rice", "date": "2026-07-10"})),
     )
     .await;
@@ -117,6 +152,7 @@ async fn total_report_respects_date_range() {
         &app,
         "GET",
         "/reports/total?from=2026-07-01&to=2026-07-31",
+        Some(&token),
         None,
     )
     .await;
@@ -127,21 +163,31 @@ async fn total_report_respects_date_range() {
 #[tokio::test]
 async fn totals_by_category_groups_and_omits_empty_categories() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (_, groceries) = request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Groceries"})),
     )
     .await;
     let groceries_id = groceries["id"].as_str().unwrap();
-    let (_, rent) = request(&app, "POST", "/categories", Some(json!({"name": "Rent"}))).await;
+    let (_, rent) = request(
+        &app,
+        "POST",
+        "/categories",
+        Some(&token),
+        Some(json!({"name": "Rent"})),
+    )
+    .await;
     let rent_id = rent["id"].as_str().unwrap();
     request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Unused"})),
     )
     .await;
@@ -150,6 +196,7 @@ async fn totals_by_category_groups_and_omits_empty_categories() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 12.5, "category_id": groceries_id, "description": "milk", "date": "2026-07-09"})),
     )
     .await;
@@ -157,6 +204,7 @@ async fn totals_by_category_groups_and_omits_empty_categories() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 7.5, "category_id": groceries_id, "description": "eggs", "date": "2026-07-10"})),
     )
     .await;
@@ -164,11 +212,19 @@ async fn totals_by_category_groups_and_omits_empty_categories() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 1000.0, "category_id": rent_id, "description": "rent", "date": "2026-07-01"})),
     )
     .await;
 
-    let (status, totals) = request(&app, "GET", "/reports/totals_by_category", None).await;
+    let (status, totals) = request(
+        &app,
+        "GET",
+        "/reports/totals_by_category",
+        Some(&token),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let totals = totals.as_array().unwrap();
@@ -187,11 +243,13 @@ async fn totals_by_category_groups_and_omits_empty_categories() {
 #[tokio::test]
 async fn totals_by_month_groups_by_year_month_and_sorts() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (_, category) = request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Groceries"})),
     )
     .await;
@@ -201,6 +259,7 @@ async fn totals_by_month_groups_by_year_month_and_sorts() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 10.0, "category_id": category_id, "description": "june", "date": "2026-06-15"})),
     )
     .await;
@@ -208,6 +267,7 @@ async fn totals_by_month_groups_by_year_month_and_sorts() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 5.0, "category_id": category_id, "description": "june again", "date": "2026-06-20"})),
     )
     .await;
@@ -215,11 +275,19 @@ async fn totals_by_month_groups_by_year_month_and_sorts() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 40.0, "category_id": category_id, "description": "july", "date": "2026-07-10"})),
     )
     .await;
 
-    let (status, totals) = request(&app, "GET", "/reports/totals_by_month", None).await;
+    let (status, totals) = request(
+        &app,
+        "GET",
+        "/reports/totals_by_month",
+        Some(&token),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let totals = totals.as_array().unwrap();
@@ -233,22 +301,32 @@ async fn totals_by_month_groups_by_year_month_and_sorts() {
 #[tokio::test]
 async fn totals_by_category_month_groups_by_category_and_month() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (_, groceries) = request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Groceries"})),
     )
     .await;
     let groceries_id = groceries["id"].as_str().unwrap();
-    let (_, rent) = request(&app, "POST", "/categories", Some(json!({"name": "Rent"}))).await;
+    let (_, rent) = request(
+        &app,
+        "POST",
+        "/categories",
+        Some(&token),
+        Some(json!({"name": "Rent"})),
+    )
+    .await;
     let rent_id = rent["id"].as_str().unwrap();
 
     request(
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 10.0, "category_id": groceries_id, "description": "milk", "date": "2026-06-05"})),
     )
     .await;
@@ -256,6 +334,7 @@ async fn totals_by_category_month_groups_by_category_and_month() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 5.0, "category_id": groceries_id, "description": "eggs", "date": "2026-06-20"})),
     )
     .await;
@@ -263,6 +342,7 @@ async fn totals_by_category_month_groups_by_category_and_month() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 8.0, "category_id": groceries_id, "description": "bread", "date": "2026-07-02"})),
     )
     .await;
@@ -270,11 +350,19 @@ async fn totals_by_category_month_groups_by_category_and_month() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 1000.0, "category_id": rent_id, "description": "rent", "date": "2026-06-01"})),
     )
     .await;
 
-    let (status, totals) = request(&app, "GET", "/reports/totals_by_category_month", None).await;
+    let (status, totals) = request(
+        &app,
+        "GET",
+        "/reports/totals_by_category_month",
+        Some(&token),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let totals = totals.as_array().unwrap();
@@ -302,11 +390,13 @@ async fn totals_by_category_month_groups_by_category_and_month() {
 #[tokio::test]
 async fn reports_with_inverted_date_range_return_empty() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (_, category) = request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Groceries"})),
     )
     .await;
@@ -315,6 +405,7 @@ async fn reports_with_inverted_date_range_return_empty() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 10.0, "category_id": category_id, "description": "milk", "date": "2026-07-09"})),
     )
     .await;
@@ -323,6 +414,7 @@ async fn reports_with_inverted_date_range_return_empty() {
         &app,
         "GET",
         "/reports/total?from=2026-08-01&to=2026-07-01",
+        Some(&token),
         None,
     )
     .await;
@@ -333,6 +425,7 @@ async fn reports_with_inverted_date_range_return_empty() {
         &app,
         "GET",
         "/reports/totals_by_category?from=2026-08-01&to=2026-07-01",
+        Some(&token),
         None,
     )
     .await;

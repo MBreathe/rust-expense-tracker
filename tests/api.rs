@@ -16,7 +16,7 @@ async fn test_state() -> AppState {
         .await
         .unwrap();
     sqlx::migrate!().run(&pool).await.unwrap();
-    AppState::new(pool)
+    AppState::new(pool, "test-secret".to_string())
 }
 
 /// Shared helper: send one request against a (cloned) router, and return the
@@ -26,9 +26,13 @@ async fn request(
     app: &Router,
     method: &str,
     uri: &str,
+    token: Option<&str>,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
     let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(token) = token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
     let body = match body {
         Some(json) => {
             builder = builder.header("content-type", "application/json");
@@ -46,15 +50,39 @@ async fn request(
     (status, value)
 }
 
+/// Registers and logs in a fresh test user, returning a bearer token to use
+/// against every protected route in these tests.
+async fn register_and_login(app: &Router) -> String {
+    request(
+        app,
+        "POST",
+        "/auth/register",
+        None,
+        Some(json!({"username": "testuser", "password": "hunter2"})),
+    )
+    .await;
+    let (_, login) = request(
+        app,
+        "POST",
+        "/auth/login",
+        None,
+        Some(json!({"username": "testuser", "password": "hunter2"})),
+    )
+    .await;
+    login["token"].as_str().unwrap().to_string()
+}
+
 #[tokio::test]
 async fn create_expense_with_valid_category() {
     let state = test_state().await;
     let app = app(state);
+    let token = register_and_login(&app).await;
 
     let create_category = Request::builder()
         .method("POST")
         .uri("/categories")
         .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
         .body(Body::from(json!({"name": "Groceries"}).to_string()))
         .unwrap();
 
@@ -65,7 +93,16 @@ async fn create_expense_with_valid_category() {
     let category: Value = serde_json::from_slice(&body).unwrap();
     let category_id = category["id"].as_str().unwrap();
 
-    let create_expense = Request::builder().method("POST").uri("/expenses").header("content-type", "application/json").body(Body::from(json!({"amount": 12.5, "category_id": category_id, "description": "milk", "date": "2026-07-09"}).to_string())).unwrap();
+    let create_expense = Request::builder()
+        .method("POST")
+        .uri("/expenses")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(
+            json!({"amount": 12.5, "category_id": category_id, "description": "milk", "date": "2026-07-09"})
+                .to_string(),
+        ))
+        .unwrap();
 
     let response = app.oneshot(create_expense).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -74,11 +111,13 @@ async fn create_expense_with_valid_category() {
 #[tokio::test]
 async fn list_expenses_returns_created_expenses() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (_, category) = request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Groceries"})),
     )
     .await;
@@ -88,6 +127,7 @@ async fn list_expenses_returns_created_expenses() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 12.5, "category_id": category_id, "description": "milk", "date": "2026-07-09"})),
     )
     .await;
@@ -95,11 +135,12 @@ async fn list_expenses_returns_created_expenses() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 40.0, "category_id": category_id, "description": "rice", "date": "2026-07-10"})),
     )
     .await;
 
-    let (status, expenses) = request(&app, "GET", "/expenses", None).await;
+    let (status, expenses) = request(&app, "GET", "/expenses", Some(&token), None).await;
     assert_eq!(status, StatusCode::OK);
 
     let descriptions: Vec<&str> = expenses
@@ -115,17 +156,26 @@ async fn list_expenses_returns_created_expenses() {
 #[tokio::test]
 async fn list_categories_returns_created_categories() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Groceries"})),
     )
     .await;
-    request(&app, "POST", "/categories", Some(json!({"name": "Rent"}))).await;
+    request(
+        &app,
+        "POST",
+        "/categories",
+        Some(&token),
+        Some(json!({"name": "Rent"})),
+    )
+    .await;
 
-    let (status, categories) = request(&app, "GET", "/categories", None).await;
+    let (status, categories) = request(&app, "GET", "/categories", Some(&token), None).await;
     assert_eq!(status, StatusCode::OK);
 
     let names: Vec<&str> = categories
@@ -141,11 +191,13 @@ async fn list_categories_returns_created_categories() {
 #[tokio::test]
 async fn get_expense_returns_404_for_unknown_id() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (status, _) = request(
         &app,
         "GET",
         "/expenses/00000000-0000-0000-0000-000000000000",
+        Some(&token),
         None,
     )
     .await;
@@ -155,11 +207,13 @@ async fn get_expense_returns_404_for_unknown_id() {
 #[tokio::test]
 async fn delete_category_returns_404_for_unknown_id() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (status, _) = request(
         &app,
         "DELETE",
         "/categories/00000000-0000-0000-0000-000000000000",
+        Some(&token),
         None,
     )
     .await;
@@ -169,11 +223,13 @@ async fn delete_category_returns_404_for_unknown_id() {
 #[tokio::test]
 async fn create_expense_with_unknown_category_returns_409() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (status, _) = request(
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({
             "amount": 5.0,
             "category_id": "00000000-0000-0000-0000-000000000000",
@@ -188,35 +244,60 @@ async fn create_expense_with_unknown_category_returns_409() {
 #[tokio::test]
 async fn delete_category_still_referenced_returns_409() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
-    let (_, category) = request(&app, "POST", "/categories", Some(json!({"name": "Rent"}))).await;
+    let (_, category) = request(
+        &app,
+        "POST",
+        "/categories",
+        Some(&token),
+        Some(json!({"name": "Rent"})),
+    )
+    .await;
     let category_id = category["id"].as_str().unwrap();
 
     let (_, expense) = request(
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 1000.0, "category_id": category_id, "description": "rent", "date": "2026-07-09"})),
     )
     .await;
     let expense_id = expense["id"].as_str().unwrap();
 
-    let (status, _) = request(&app, "DELETE", &format!("/categories/{category_id}"), None).await;
+    let (status, _) = request(
+        &app,
+        "DELETE",
+        &format!("/categories/{category_id}"),
+        Some(&token),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 
     // the expense should be untouched by the failed delete
-    let (status, _) = request(&app, "GET", &format!("/expenses/{expense_id}"), None).await;
+    let (status, _) = request(
+        &app,
+        "GET",
+        &format!("/expenses/{expense_id}"),
+        Some(&token),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
 async fn update_expense_replaces_fields() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (_, category) = request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Groceries"})),
     )
     .await;
@@ -226,6 +307,7 @@ async fn update_expense_replaces_fields() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 10.0, "category_id": category_id, "description": "milk", "date": "2026-07-09"})),
     )
     .await;
@@ -235,6 +317,7 @@ async fn update_expense_replaces_fields() {
         &app,
         "PUT",
         &format!("/expenses/{expense_id}"),
+        Some(&token),
         Some(json!({"amount": 25.0, "category_id": category_id, "description": "milk and eggs", "date": "2026-07-10"})),
     )
     .await;
@@ -248,11 +331,13 @@ async fn update_expense_replaces_fields() {
 #[tokio::test]
 async fn delete_expense_removes_it() {
     let app = app(test_state().await);
+    let token = register_and_login(&app).await;
 
     let (_, category) = request(
         &app,
         "POST",
         "/categories",
+        Some(&token),
         Some(json!({"name": "Groceries"})),
     )
     .await;
@@ -262,15 +347,30 @@ async fn delete_expense_removes_it() {
         &app,
         "POST",
         "/expenses",
+        Some(&token),
         Some(json!({"amount": 10.0, "category_id": category_id, "description": "milk", "date": "2026-07-09"})),
     )
     .await;
     let expense_id = expense["id"].as_str().unwrap();
 
-    let (status, deleted) = request(&app, "DELETE", &format!("/expenses/{expense_id}"), None).await;
+    let (status, deleted) = request(
+        &app,
+        "DELETE",
+        &format!("/expenses/{expense_id}"),
+        Some(&token),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(deleted["id"], expense_id);
 
-    let (status, _) = request(&app, "GET", &format!("/expenses/{expense_id}"), None).await;
+    let (status, _) = request(
+        &app,
+        "GET",
+        &format!("/expenses/{expense_id}"),
+        Some(&token),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
