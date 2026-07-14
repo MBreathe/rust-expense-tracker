@@ -1,2 +1,3 @@
 pub mod category;
 pub mod expense;
+pub mod report;

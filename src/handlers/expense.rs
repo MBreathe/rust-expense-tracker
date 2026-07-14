@@ -1,6 +1,7 @@
 use axum::{
-    Json,
+    Json, Router,
     extract::{Path, State},
+    routing::get,
 };
 use uuid::Uuid;
 
@@ -9,6 +10,15 @@ use crate::{
     models::expense::{Expense, NewExpense},
     state::AppState,
 };
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_expenses).post(create_expense))
+        .route(
+            "/{id}",
+            get(get_expense).put(update_expense).delete(delete_expense),
+        )
+}
 
 pub async fn list_expenses(State(state): State<AppState>) -> Result<Json<Vec<Expense>>, AppError> {
     let expenses = state.list_expenses().await?;

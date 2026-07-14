@@ -1,6 +1,7 @@
 use axum::{
-    Json,
+    Json, Router,
     extract::{Path, State},
+    routing::{delete, get},
 };
 use uuid::Uuid;
 
@@ -9,6 +10,12 @@ use crate::{
     models::category::{Category, NewCategory},
     state::AppState,
 };
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/", get(list_categories).post(create_category))
+        .route("/{id}", delete(delete_category))
+}
 
 pub async fn list_categories(
     State(state): State<AppState>,

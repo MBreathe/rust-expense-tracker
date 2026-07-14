@@ -1,9 +1,6 @@
 use std::str::FromStr;
 
-use axum::{
-    Router,
-    routing::{delete, get},
-};
+use axum::Router;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -12,21 +9,14 @@ pub mod handlers;
 pub mod models;
 pub mod state;
 
-use handlers::{
-    category::{create_category, delete_category, list_categories},
-    expense::{create_expense, delete_expense, get_expense, list_expenses, update_expense},
-};
+use handlers::{category, expense, report};
 use state::AppState;
 
 pub fn app(state: AppState) -> Router {
     Router::new()
-        .route("/expenses", get(list_expenses).post(create_expense))
-        .route(
-            "/expenses/{id}",
-            get(get_expense).put(update_expense).delete(delete_expense),
-        )
-        .route("/categories", get(list_categories).post(create_category))
-        .route("/categories/{id}", delete(delete_category))
+        .nest("/categories", category::routes())
+        .nest("/expenses", expense::routes())
+        .nest("/reports", report::routes())
         .with_state(state)
 }
 

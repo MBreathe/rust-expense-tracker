@@ -2,6 +2,7 @@ use sqlx::SqlitePool;
 
 pub mod category;
 pub mod expense;
+pub mod report;
 
 #[derive(Clone)]
 pub struct AppState {
