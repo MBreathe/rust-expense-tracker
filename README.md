@@ -30,7 +30,7 @@ the way: `update_expense` was reusing `insert_expense`, which violated the
 
 **M3 — Stretch goals** (pick as interest allows)
 Expense totals/reports (by category, by month) — **done**. Basic auth — **done**.
-Remaining: a small CLI client, Docker packaging.
+A small CLI client — **done**. Remaining: Docker packaging.
 
 ## Data model
 
@@ -73,9 +73,40 @@ except `POST /auth/register` and `POST /auth/login`.
 3. `sqlx database create && sqlx migrate run` — creates `expenses.db` and applies `migrations/`.
 4. `cargo run` — the binary also re-applies migrations automatically on startup via `sqlx::migrate!()`.
 
+## CLI Client
+
+A command-line client for the API, built as a second binary (`cargo run --bin cli -- <args>`
+locally, or `cli <args>` once installed/on `PATH`). Talks to `http://localhost:3000` by
+default — override with the `API_BASE_URL` env var. Full parity with the HTTP API:
+
+```
+cli register --username alice --password ...
+cli login    --username alice --password ...   # saves a token to ~/.config/rust-expense-tracker/token
+
+cli expense list
+cli expense get <id>
+cli expense create --amount 12.5 --category-id <id> --description milk --date 2026-07-09
+cli expense update <id> --amount 20.0 --category-id <id> --description "milk and eggs" --date 2026-07-10
+cli expense delete <id>
+
+cli category list
+cli category create --name Groceries
+cli category delete <id>
+
+cli report total              [--from <date>] [--to <date>]
+cli report by-category        [--from <date>] [--to <date>]
+cli report by-month           [--from <date>] [--to <date>]
+cli report by-category-month  [--from <date>] [--to <date>]
+```
+
+`login` (once) is enough to use every other command afterward — the saved token is sent
+automatically. Note: `cargo check` doesn't rebuild the actual binary — if `cargo run --bin cli`
+ever appears to do nothing, run `cargo build --bin cli` first.
+
 ## Status
 
-M1, M2, the test suite, and two M3 stretch goals (reports/totals, basic auth) are
-complete: a working SQLite-backed CRUD API for expenses and categories, reporting
-endpoints, and JWT-based auth gating every route but registration/login — with
-foreign-key integrity and proper error responses (401 / 404 / 409 / 500).
+M1, M2, the test suite, and three M3 stretch goals (reports/totals, basic auth, a CLI
+client) are complete: a working SQLite-backed CRUD API for expenses and categories,
+reporting endpoints, JWT-based auth gating every route but registration/login, and a
+full-parity CLI client — with foreign-key integrity and proper error responses
+(401 / 404 / 409 / 500).

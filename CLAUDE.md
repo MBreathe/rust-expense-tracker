@@ -16,10 +16,11 @@ integration test suite are done. The project deliberately expanded scope mid-M2:
 moved from a fixed Rust enum to their own database-backed resource with CRUD endpoints, once a
 closed category list felt too limiting.
 
-M3 stretch goals: reports/totals, basic auth, a CLI client, Docker packaging. Reports/totals and
-basic auth (see the `report`/`user`/`auth` bullets in Architecture/Database/Testing below) are
-both done. The API now requires a bearer token on every route except `POST /auth/register` and
-`POST /auth/login`. A CLI client and Docker packaging remain; no decision yet on which is next.
+M3 stretch goals: reports/totals, basic auth, a CLI client, Docker packaging. Reports/totals,
+basic auth, and a CLI client (see the `report`/`user`/`auth` bullets in
+Architecture/Database/Testing, and the dedicated CLI Client section, below) are all done. The
+API requires a bearer token on every route except `POST /auth/register` and `POST /auth/login`.
+Docker packaging is the only thing left, not started.
 
 ## Architecture
 
@@ -27,16 +28,21 @@ both done. The API now requires a bearer token on every route except `POST /auth
   The `New*` types omit `id` (server-generated via `Uuid::new_v4()` in the handler) and only
   derive `Deserialize`, since they're request-body-only.
 - **`models/report.rs`** — the reverse split from `New*`: `TotalReport`, `CategoryTotal`,
-  `MonthTotal`, `CategoryMonthTotal` only derive `Serialize` (no `Deserialize`/`Clone`), since
-  they're response-body-only — nothing ever deserializes a report from a request. `month` is a
-  plain `String` in `"YYYY-MM"` form, not a `NaiveDate`, since a year-month bucket isn't a real
-  calendar date. `ReportFilter` (`Deserialize`-only, `from`/`to`: `Option<NaiveDate>`) is the
-  shared query-param struct for all four report endpoints, extracted via Axum's
-  `Query<ReportFilter>` the same way `Json<NewExpense>` extracts a body.
-- **`models/user.rs`** — `User { id, username }` (`Serialize`-only — no `password_hash` field,
-  so it's structurally impossible to leak one in a response) and `Credentials { username,
-  password }` (`Deserialize`-only, deliberately shared by both `/auth/register` and
-  `/auth/login` since both receive exactly the same shape).
+  `MonthTotal`, `CategoryMonthTotal` are server response bodies — nothing on the *server* ever
+  deserializes one — but all four also derive `Deserialize` (not just `Serialize`) so the CLI
+  (`src/bin/cli/`, same crate) can deserialize its own HTTP responses straight into these same
+  types instead of redefining them. `month` is a plain `String` in `"YYYY-MM"` form, not a
+  `NaiveDate`, since a year-month bucket isn't a real calendar date. `ReportFilter`
+  (`Deserialize`-only, `from`/`to`: `Option<NaiveDate>`) is the shared query-param struct for
+  all four report endpoints, extracted via Axum's `Query<ReportFilter>` the same way
+  `Json<NewExpense>` extracts a body.
+- **`models/user.rs`** — `User { id, username }` (no `password_hash` field, so it's structurally
+  impossible to leak one in a response) and `Credentials { username, password }`
+  (`Deserialize`-only, deliberately shared by both `/auth/register` and `/auth/login` since both
+  receive exactly the same shape) and `TokenResponse { token }`. `User`/`TokenResponse` derive
+  both `Serialize` and `Deserialize` — `Deserialize` was added specifically for the CLI to
+  reuse these types when parsing its own HTTP responses (same reasoning as `models/report.rs`
+  above); the server itself only ever serializes them.
 - **`state.rs`** — defines the single `AppState` struct (`Clone`, wraps a `sqlx::SqlitePool`
   plus a `pub jwt_secret: String`). `pool` stays private — only reached through `AppState`'s
   own methods — while `jwt_secret` is `pub` since `auth.rs` needs to read it directly from
@@ -174,10 +180,52 @@ both done. The API now requires a bearer token on every route except `POST /auth
   regardless of their actual text, which would make a "these two responses are identical"
   assertion pass trivially, catching nothing.
 
+## CLI Client (`src/bin/cli/`)
+
+A second binary in this same crate (not a separate workspace member), giving full CRUD parity
+with the HTTP API via nested `clap` subcommands (`cli expense list`, `cli report total`, etc.).
+Being in the same crate is what lets it reuse the server's own model types directly instead of
+redefining them — see the `Deserialize` additions on `models/user.rs`/`models/report.rs` above.
+
+- **`main.rs`** — `Cli::parse()`, then a nested `match` on `Command` (mirroring the nested
+  `Subcommand` enums in `args.rs`) dispatching to the matching `commands::*` function. Prints
+  and exits non-zero on a returned `CliError`.
+- **`args.rs`** — the `clap` derive types. `Command::Expense(ExpenseCommand)` etc. — a tuple
+  variant wrapping another `Subcommand` enum, marked `#[command(subcommand)]` — is the trick
+  that makes two-level commands like `expense list` work. Fields with no `#[arg(...)]` attribute
+  are positional (`id: Uuid` in `Get`/`Delete`); `#[arg(long)]` makes a named flag.
+- **`http.rs`** — `request<T: DeserializeOwned>(method, path, auth, body) -> Result<T, CliError>`
+  is the one function every command goes through: builds the URL from a base (defaults to
+  `http://localhost:3000`, override via `API_BASE_URL`), attaches `Authorization: Bearer` when
+  `auth` is true (reading the saved token, `CliError::NotLoggedIn` if there isn't one), sends
+  the request, and deserializes the response body straight into whatever type the caller asked
+  for. Also defines `CliError` (`NotLoggedIn`, `Request(reqwest::Error)`,
+  `Api { status, body }`, `Io(std::io::Error)`) with a `Display` impl and `From` conversions,
+  mirroring the server's own `AppError` pattern.
+- **`token.rs`** — persists the bearer token as plain text at
+  `~/.config/rust-expense-tracker/token` (via `std::env::var("HOME")`, not the `dirs` crate —
+  this only ever needs to run on one machine). `login` writes it; every other command reads it.
+- **`commands/{auth,category,expense,report}.rs`** — one function per endpoint, same
+  resource-per-file split as the server's own `handlers/`. Each pulls response formatting into a
+  private `format_*(&T) -> String` function (e.g. `format_expense`, `format_category_total`)
+  rather than inlining `println!` — that's what makes the formatting logic unit-testable
+  without capturing stdout, and it's also why those tests live inline in the same file
+  (`#[cfg(test)] mod tests { use super::*; ... }`) rather than under `tests/`: unit tests need
+  access to private items, which a separate file/crate (like everything under `tests/` already
+  is) fundamentally can't reach. `report.rs`'s `build_query(from, to)` builds the `?from=&to=`
+  query string — deliberately kept out of `http::request` itself, since it's specific to only
+  these four callers.
+- No persisted design doc for this feature (same as reports/auth) — the design was agreed
+  conversationally and implemented directly.
+
 ## Commands
 
 - `cargo build` / `cargo run` — compile / run the server (port 3000)
-- `cargo test` — run all tests; `cargo test <name>` for a single test
-- `cargo clippy` — lint
+- `cargo build --bin cli` / `cargo run --bin cli -- <args>` — compile / run the CLI client.
+  Note: `cargo check` does *not* rebuild the actual binary — if `cargo run --bin cli` ever
+  silently does nothing, rebuild with `cargo build --bin cli` before assuming the code is wrong.
+- `cargo test` — run all tests (server integration tests + CLI unit tests); `cargo test <name>`
+  for a single test; `cargo test --bin cli` for just the CLI's unit tests.
+- `cargo clippy --all-targets` — lint everything, including the CLI binary and its tests.
 - `sqlx migrate add <name>` — scaffold a new migration
 - `sqlx migrate run` — apply pending migrations manually (also happens automatically on `cargo run`)

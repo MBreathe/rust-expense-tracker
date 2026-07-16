@@ -2,25 +2,25 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct TotalReport {
     pub total: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CategoryTotal {
     pub category_id: Uuid,
     pub category_name: String,
     pub total: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct MonthTotal {
     pub month: String,
     pub total: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CategoryMonthTotal {
     pub category_id: Uuid,
     pub category_name: String,
