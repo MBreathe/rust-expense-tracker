@@ -30,7 +30,8 @@ the way: `update_expense` was reusing `insert_expense`, which violated the
 
 **M3 — Stretch goals** (pick as interest allows)
 Expense totals/reports (by category, by month) — **done**. Basic auth — **done**.
-A small CLI client — **done**. Remaining: Docker packaging.
+A small CLI client — **done**. Docker packaging was considered and deliberately
+skipped — the project is considered complete without it.
 
 ## Data model
 

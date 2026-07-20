@@ -27,7 +27,8 @@ pub fn app(state: AppState) -> Router {
 pub async fn connect(database_url: &str) -> SqlitePool {
     let connect_options = SqliteConnectOptions::from_str(database_url)
         .unwrap()
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .create_if_missing(true);
     let pool = SqlitePoolOptions::new()
         .connect_with(connect_options)
         .await

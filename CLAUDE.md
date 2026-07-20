@@ -20,7 +20,8 @@ M3 stretch goals: reports/totals, basic auth, a CLI client, Docker packaging. Re
 basic auth, and a CLI client (see the `report`/`user`/`auth` bullets in
 Architecture/Database/Testing, and the dedicated CLI Client section, below) are all done. The
 API requires a bearer token on every route except `POST /auth/register` and `POST /auth/login`.
-Docker packaging is the only thing left, not started.
+Docker packaging was considered and deliberately skipped — the project is considered complete
+as-is; don't suggest picking it back up unless asked.
 
 ## Architecture
 
